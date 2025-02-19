@@ -1,0 +1,11 @@
+[Unit]
+Description=SSH Log Monitor Service
+After=network.target
+
+[Service]
+ExecStart=/path/to/ssh_monitor.sh
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
