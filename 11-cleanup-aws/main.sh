@@ -36,6 +36,176 @@ run_cmd() {
     fi
 }
 
+# ===== IAM CLEANUP (Global - not region-specific) =====
+
+# 0a. Deactivate and Delete IAM Access Keys
+echo -e "\n${GREEN}>>> Deactivating and Deleting IAM Access Keys...${NC}"
+users=$(aws iam list-users --query 'Users[].UserName' --output text)
+for user in $users; do
+    # Skip AWS managed service-linked accounts
+    if [[ "$user" == *"service-linked"* ]]; then
+        continue
+    fi
+    
+    access_keys=$(aws iam list-access-keys --user-name $user --query 'AccessKeyMetadata[].AccessKeyId' --output text)
+    for key in $access_keys; do
+        # First deactivate the key
+        run_cmd "aws iam update-access-key --user-name $user --access-key-id $key --status Inactive"
+        # Then delete it
+        run_cmd "aws iam delete-access-key --user-name $user --access-key-id $key"
+    done
+done
+
+# 0b. Delete IAM Login Profiles (console password)
+echo -e "\n${GREEN}>>> Deleting IAM Login Profiles...${NC}"
+for user in $users; do
+    if [[ "$user" == *"service-linked"* ]]; then
+        continue
+    fi
+    run_cmd "aws iam delete-login-profile --user-name $user"
+done
+
+# 0c. Delete IAM MFA Devices
+echo -e "\n${GREEN}>>> Deactivating IAM MFA Devices...${NC}"
+for user in $users; do
+    if [[ "$user" == *"service-linked"* ]]; then
+        continue
+    fi
+    
+    mfa_devices=$(aws iam list-mfa-devices --user-name $user --query 'MFADevices[].SerialNumber' --output text)
+    for mfa in $mfa_devices; do
+        run_cmd "aws iam deactivate-mfa-device --user-name $user --serial-number $mfa"
+    done
+done
+
+# 0d. Detach Inline Policies from Users
+echo -e "\n${GREEN}>>> Removing Inline Policies from Users...${NC}"
+for user in $users; do
+    if [[ "$user" == *"service-linked"* ]]; then
+        continue
+    fi
+    
+    inline_policies=$(aws iam list-user-policies --user-name $user --query 'PolicyNames' --output text)
+    for policy in $inline_policies; do
+        run_cmd "aws iam delete-user-policy --user-name $user --policy-name $policy"
+    done
+done
+
+# 0e. Detach Managed Policies from Users
+echo -e "\n${GREEN}>>> Detaching Managed Policies from Users...${NC}"
+for user in $users; do
+    if [[ "$user" == *"service-linked"* ]]; then
+        continue
+    fi
+    
+    attached_policies=$(aws iam list-attached-user-policies --user-name $user --query 'AttachedPolicies[].PolicyArn' --output text)
+    for policy_arn in $attached_policies; do
+        run_cmd "aws iam detach-user-policy --user-name $user --policy-arn $policy_arn"
+    done
+done
+
+# 0f. Remove Users from Groups
+echo -e "\n${GREEN}>>> Removing Users from Groups...${NC}"
+for user in $users; do
+    if [[ "$user" == *"service-linked"* ]]; then
+        continue
+    fi
+    
+    groups=$(aws iam list-groups-for-user --user-name $user --query 'Groups[].GroupName' --output text)
+    for group in $groups; do
+        run_cmd "aws iam remove-user-from-group --user-name $user --group-name $group"
+    done
+done
+
+# 0g. Delete IAM Users
+echo -e "\n${GREEN}>>> Deleting IAM Users...${NC}"
+for user in $users; do
+    if [[ "$user" == *"service-linked"* ]]; then
+        continue
+    fi
+    run_cmd "aws iam delete-user --user-name $user"
+done
+
+# 0h. Delete IAM Groups
+echo -e "\n${GREEN}>>> Deleting IAM Groups...${NC}"
+groups=$(aws iam list-groups --query 'Groups[].GroupName' --output text)
+for group in $groups; do
+    # Remove inline policies from group
+    group_policies=$(aws iam list-group-policies --group-name $group --query 'PolicyNames' --output text)
+    for policy in $group_policies; do
+        run_cmd "aws iam delete-group-policy --group-name $group --policy-name $policy"
+    done
+    
+    # Detach managed policies from group
+    attached_policies=$(aws iam list-attached-group-policies --group-name $group --query 'AttachedPolicies[].PolicyArn' --output text)
+    for policy_arn in $attached_policies; do
+        run_cmd "aws iam detach-group-policy --group-name $group --policy-arn $policy_arn"
+    done
+    
+    # Delete the group
+    run_cmd "aws iam delete-group --group-name $group"
+done
+
+# 0i. Detach Inline Policies from Roles
+echo -e "\n${GREEN}>>> Removing Inline Policies from Roles...${NC}"
+roles=$(aws iam list-roles --query 'Roles[].RoleName' --output text)
+for role in $roles; do
+    inline_policies=$(aws iam list-role-policies --role-name $role --query 'PolicyNames' --output text 2>/dev/null || echo "")
+    for policy in $inline_policies; do
+        run_cmd "aws iam delete-role-policy --role-name $role --policy-name $policy"
+    done
+done
+
+# 0j. Detach Managed Policies from Roles
+echo -e "\n${GREEN}>>> Detaching Managed Policies from Roles...${NC}"
+for role in $roles; do
+    attached_policies=$(aws iam list-attached-role-policies --role-name $role --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || echo "")
+    for policy_arn in $attached_policies; do
+        # Skip AWS managed policies
+        if [[ "$policy_arn" != "arn:aws:iam::aws:policy/"* ]]; then
+            run_cmd "aws iam detach-role-policy --role-name $role --policy-arn $policy_arn"
+        fi
+    done
+done
+
+# 0k. Delete Instance Profiles and Remove Roles
+echo -e "\n${GREEN}>>> Deleting Instance Profiles...${NC}"
+instance_profiles=$(aws iam list-instance-profiles --query 'InstanceProfiles[].InstanceProfileName' --output text)
+for profile in $instance_profiles; do
+    roles_in_profile=$(aws iam get-instance-profile --instance-profile-name $profile --query 'InstanceProfile.Roles[].RoleName' --output text)
+    for role in $roles_in_profile; do
+        run_cmd "aws iam remove-role-from-instance-profile --instance-profile-name $profile --role-name $role"
+    done
+    run_cmd "aws iam delete-instance-profile --instance-profile-name $profile"
+done
+
+# 0l. Delete Custom IAM Policies
+echo -e "\n${GREEN}>>> Deleting Custom IAM Policies...${NC}"
+policies=$(aws iam list-policies --scope Local --query 'Policies[].Arn' --output text)
+for policy_arn in $policies; do
+    # Delete all versions except default
+    versions=$(aws iam list-policy-versions --policy-arn $policy_arn --query 'Versions[?!IsDefaultVersion].VersionId' --output text)
+    for version in $versions; do
+        run_cmd "aws iam delete-policy-version --policy-arn $policy_arn --version-id $version"
+    done
+    
+    # Delete the policy itself
+    run_cmd "aws iam delete-policy --policy-arn $policy_arn"
+done
+
+# 0m. Delete IAM Roles (user-created only)
+echo -e "\n${GREEN}>>> Deleting IAM Roles...${NC}"
+for role in $roles; do
+    # Skip AWS service-linked roles
+    if [[ "$role" == *"AWSServiceRoleFor"* ]] || [[ "$role" == *"aws-service-role"* ]]; then
+        continue
+    fi
+    
+    run_cmd "aws iam delete-role --role-name $role" 2>/dev/null || true
+done
+
+# ===== REGIONAL RESOURCE CLEANUP =====
+
 # 1. EC2 Instances
 echo -e "\n${GREEN}>>> Terminating EC2 Instances...${NC}"
 instances=$(aws ec2 describe-instances --region $REGION --query 'Reservations[].Instances[?State.Name!=`terminated`].InstanceId' --output text)
@@ -369,7 +539,7 @@ for vpc in $vpcs; do
     run_cmd "aws ec2 delete-vpc --region $REGION --vpc-id $vpc"
 done
 
-# 32. S3 Buckets in region
+# 35. S3 Buckets in region
 echo -e "\n${GREEN}>>> Deleting S3 Buckets...${NC}"
 buckets=$(aws s3api list-buckets --query 'Buckets[].Name' --output text)
 for bucket in $buckets; do
@@ -380,25 +550,127 @@ for bucket in $buckets; do
     fi
 done
 
-# 33. DynamoDB Tables
+# 36. DynamoDB Tables
 echo -e "\n${GREEN}>>> Deleting DynamoDB Tables...${NC}"
 tables=$(aws dynamodb list-tables --region $REGION --query 'TableNames' --output text)
 for table in $tables; do
     run_cmd "aws dynamodb delete-table --region $REGION --table-name $table"
 done
 
-# 34. Kinesis Streams
+# 37. Kinesis Streams
 echo -e "\n${GREEN}>>> Deleting Kinesis Streams...${NC}"
 streams=$(aws kinesis list-streams --region $REGION --query 'StreamNames' --output text)
 for stream in $streams; do
     run_cmd "aws kinesis delete-stream --region $REGION --stream-name $stream --enforce-consumer-deletion"
 done
 
-# 35. CloudFormation Stacks
+# 38. CloudFormation Stacks
 echo -e "\n${GREEN}>>> Deleting CloudFormation Stacks...${NC}"
 stacks=$(aws cloudformation list-stacks --region $REGION --query 'StackSummaries[?StackStatus!=`DELETE_COMPLETE`].StackName' --output text)
 for stack in $stacks; do
     run_cmd "aws cloudformation delete-stack --region $REGION --stack-name $stack"
+done
+
+# 39. Glue Databases and Tables
+echo -e "\n${GREEN}>>> Deleting AWS Glue Databases...${NC}"
+databases=$(aws glue get-databases --region $REGION --query 'DatabaseList[].Name' --output text 2>/dev/null || echo "")
+for db in $databases; do
+    # Delete tables in database first
+    tables=$(aws glue get-tables --region $REGION --database-name $db --query 'TableList[].Name' --output text 2>/dev/null || echo "")
+    for table in $tables; do
+        run_cmd "aws glue delete-table --region $REGION --database-name $db --name $table"
+    done
+    # Delete database
+    run_cmd "aws glue delete-database --region $REGION --name $db"
+done
+
+# 40. SageMaker Resources
+echo -e "\n${GREEN}>>> Deleting SageMaker Endpoints and Models...${NC}"
+endpoints=$(aws sagemaker list-endpoints --region $REGION --query 'Endpoints[].EndpointName' --output text 2>/dev/null || echo "")
+for endpoint in $endpoints; do
+    run_cmd "aws sagemaker delete-endpoint --region $REGION --endpoint-name $endpoint"
+done
+
+models=$(aws sagemaker list-models --region $REGION --query 'Models[].ModelName' --output text 2>/dev/null || echo "")
+for model in $models; do
+    run_cmd "aws sagemaker delete-model --region $REGION --model-name $model"
+done
+
+# 41. Batch Job Queues and Compute Environments
+echo -e "\n${GREEN}>>> Deleting AWS Batch Resources...${NC}"
+queues=$(aws batch describe-job-queues --region $REGION --query 'jobQueues[].jobQueueName' --output text 2>/dev/null || echo "")
+for queue in $queues; do
+    run_cmd "aws batch update-job-queue --region $REGION --job-queue $queue --state DISABLED"
+    run_cmd "aws batch delete-job-queue --region $REGION --job-queue $queue"
+done
+
+compute_envs=$(aws batch describe-compute-environments --region $REGION --query 'computeEnvironments[].computeEnvironmentName' --output text 2>/dev/null || echo "")
+for env in $compute_envs; do
+    run_cmd "aws batch update-compute-environment --region $REGION --compute-environment $env --state DISABLED"
+    run_cmd "aws batch delete-compute-environment --region $REGION --compute-environment $env"
+done
+
+# 42. Step Functions State Machines
+echo -e "\n${GREEN}>>> Deleting Step Functions State Machines...${NC}"
+state_machines=$(aws stepfunctions list-state-machines --region $REGION --query 'stateMachines[].stateMachineArn' --output text 2>/dev/null || echo "")
+for sm in $state_machines; do
+    run_cmd "aws stepfunctions delete-state-machine --region $REGION --state-machine-arn $sm"
+done
+
+# 43. Data Pipeline Objects
+echo -e "\n${GREEN}>>> Deleting Data Pipeline Objects...${NC}"
+pipelines=$(aws datapipeline list-pipelines --region $REGION --query 'pipelineIdList[].id' --output text 2>/dev/null || echo "")
+for pipeline in $pipelines; do
+    run_cmd "aws datapipeline delete-pipeline --region $REGION --pipeline-id $pipeline"
+done
+
+# 44. ElasticSearch Domains
+echo -e "\n${GREEN}>>> Deleting Elasticsearch Domains...${NC}"
+domains=$(aws es list-domain-names --region $REGION --query 'DomainNames[].DomainName' --output text 2>/dev/null || echo "")
+for domain in $domains; do
+    run_cmd "aws es delete-elasticsearch-domain --region $REGION --domain-name $domain"
+done
+
+# 45. OpenSearch Domains
+echo -e "\n${GREEN}>>> Deleting OpenSearch Domains...${NC}"
+os_domains=$(aws opensearch list-domain-names --region $REGION --query 'DomainNames[].DomainName' --output text 2>/dev/null || echo "")
+for domain in $os_domains; do
+    run_cmd "aws opensearch delete-domain --region $REGION --domain-name $domain"
+done
+
+# 46. DocumentDB Clusters
+echo -e "\n${GREEN}>>> Deleting DocumentDB Clusters...${NC}"
+doc_clusters=$(aws docdb describe-db-clusters --region $REGION --query 'DBClusters[].DBClusterIdentifier' --output text 2>/dev/null || echo "")
+for cluster in $doc_clusters; do
+    run_cmd "aws docdb delete-db-cluster --region $REGION --db-cluster-identifier $cluster --skip-final-snapshot"
+done
+
+# 47. Redshift Clusters
+echo -e "\n${GREEN}>>> Deleting Redshift Clusters...${NC}"
+rs_clusters=$(aws redshift describe-clusters --region $REGION --query 'Clusters[].ClusterIdentifier' --output text 2>/dev/null || echo "")
+for cluster in $rs_clusters; do
+    run_cmd "aws redshift delete-cluster --region $REGION --cluster-identifier $cluster --skip-final-cluster-snapshot"
+done
+
+# 48. AppSync GraphQL APIs
+echo -e "\n${GREEN}>>> Deleting AppSync GraphQL APIs...${NC}"
+appsync_apis=$(aws appsync list-graphql-apis --region $REGION --query 'graphqlApis[].apiId' --output text 2>/dev/null || echo "")
+for api in $appsync_apis; do
+    run_cmd "aws appsync delete-graphql-api --region $REGION --api-id $api"
+done
+
+# 49. CodePipeline Pipelines
+echo -e "\n${GREEN}>>> Deleting CodePipeline Pipelines...${NC}"
+pipelines=$(aws codepipeline list-pipelines --region $REGION --query 'pipelines[].name' --output text 2>/dev/null || echo "")
+for pipeline in $pipelines; do
+    run_cmd "aws codepipeline delete-pipeline --region $REGION --name $pipeline"
+done
+
+# 50. CodeBuild Projects
+echo -e "\n${GREEN}>>> Deleting CodeBuild Projects...${NC}"
+projects=$(aws codebuild list-projects --region $REGION --query 'projects' --output text 2>/dev/null || echo "")
+for project in $projects; do
+    run_cmd "aws codebuild delete-project --region $REGION --name $project"
 done
 
 echo -e "\n${GREEN}============================================${NC}"
